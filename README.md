@@ -1,36 +1,175 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Stripe Integration & Zustand Persist in Next.js
 
-## Getting Started
+## Stripe Integration
 
-First, run the development server:
+### 1. Install Stripe Packages
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+npm install stripe @stripe/stripe-js
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+### 2. Set Environment Variables
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+Add these to your `.env` and Vercel dashboard:
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+```
+STRIPE_SECRET_KEY=sk_test_...
+NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY=pk_test_...
+NEXT_PUBLIC_BASE_URL=https://your-app-url.vercel.app
+```
 
-## Learn More
+### 3. Stripe Utility
 
-To learn more about Next.js, take a look at the following resources:
+`lib/stripe.ts`:
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+```typescript
+import Stripe from "stripe";
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+export const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!, {
+  apiVersion: "2024-04-10",
+});
+```
 
-## Deploy on Vercel
+### 4. Checkout Action (Server Action or API Route)
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+`app/checkout/checkout-action.ts`:
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+```typescript
+"use server";
+import { stripe } from "@/lib/stripe";
+
+export async function createCheckoutSession(items: any[]) {
+  const session = await stripe.checkout.sessions.create({
+    payment_method_types: ["card"],
+    line_items: items.map((item) => ({
+      price_data: {
+        currency: "usd",
+        product_data: {
+          name: item.name,
+        },
+        unit_amount: item.price * 100,
+      },
+      quantity: item.quantity,
+    })),
+    mode: "payment",
+    success_url: `${process.env.NEXT_PUBLIC_BASE_URL}/success`,
+    cancel_url: `${process.env.NEXT_PUBLIC_BASE_URL}/cancel`,
+  });
+  return session.url;
+}
+```
+
+### 5. Stripe.js on the Client
+
+`app/checkout/page.tsx`:
+
+```typescript
+"use client";
+import { loadStripe } from "@stripe/stripe-js";
+
+const stripePromise = loadStripe(
+  process.env.NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY!
+);
+
+export default function CheckoutButton({ items }) {
+  const handleCheckout = async () => {
+    const res = await fetch("/api/checkout", {
+      method: "POST",
+      body: JSON.stringify({ items }),
+      headers: { "Content-Type": "application/json" },
+    });
+    const { url } = await res.json();
+    const stripe = await stripePromise;
+    stripe?.redirectToCheckout({ sessionId: url });
+  };
+
+  return <button onClick={handleCheckout}>Checkout</button>;
+}
+```
+
+---
+
+## Zustand with Persist
+
+### 1. Install Zustand
+
+```bash
+npm install zustand
+```
+
+### 2. Create a Store with Persist
+
+`store/cart-store.ts`:
+
+```typescript
+import { create } from "zustand";
+import { persist } from "zustand/middleware";
+
+export type CartItem = {
+  id: string;
+  name: string;
+  price: number;
+  imageUrl: string | null;
+  quantity: number;
+};
+
+export type CartStore = {
+  items: CartItem[];
+  addItem: (item: CartItem) => void;
+  removeItem: (id: string) => void;
+  clearCart: () => void;
+};
+
+export const useCartStore = create<CartStore>()(
+  persist(
+    (set) => ({
+      items: [],
+      addItem: (item) =>
+        set((state) => {
+          const existing = state.items.find((i) => i.id === item.id);
+          if (existing) {
+            return {
+              items: state.items.map((i) =>
+                i.id === item.id
+                  ? { ...i, quantity: i.quantity + item.quantity }
+                  : i
+              ),
+            };
+          }
+          return {
+            items: [...state.items, item],
+          };
+        }),
+      removeItem: (id) =>
+        set((state) => ({
+          items: state.items
+            .map((item) =>
+              item.id === id ? { ...item, quantity: item.quantity - 1 } : item
+            )
+            .filter((item) => item.quantity > 0),
+        })),
+      clearCart: () => set({ items: [] }),
+    }),
+    { name: "cart" }
+  )
+);
+```
+
+### 3. Use the Store in Components
+
+```typescript
+import { useCartStore } from "@/store/cart-store";
+
+function CartComponent() {
+  const { items, addItem, removeItem, clearCart } = useCartStore();
+  // ...render cart UI
+}
+```
+
+---
+
+## Summary
+
+- Use Stripe’s secret key on the server and publishable key on the client.
+- Always include the full URL (with `https://`) in your environment variables.
+- Use Zustand’s `persist` middleware for localStorage cart state.
